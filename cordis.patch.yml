@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-mermaid
+      name: '@local/dsh-mermaid'
+      config:
+        # Render ```mermaid fences in agent output. The mermaid bundle is served
+        # from this plugin's own directory, so the renderer is self-contained.
+        enabled: true
