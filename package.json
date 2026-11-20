@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-mermaid",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "icon": "./icon.svg",
   "private": true,
   "type": "module",

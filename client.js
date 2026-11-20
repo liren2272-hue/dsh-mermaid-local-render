@@ -26,7 +26,6 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const useState = React.useState;
     const useEffect = React.useEffect;
-    const useRef = React.useRef;
     const useCallback = React.useCallback;
 
     /**
@@ -51,7 +50,22 @@ window.__ModuleLoader__.load({
 
     var MERMAID_SRC = routeUrl('dsh-mermaid/mermaid.min.js');
     var mermaidPromise = null;
+    // Module-wide monotonic render id. Per-instance counters restart at 1 for
+    // every diagram, so two diagrams in one conversation both got the id
+    // "dsh-mermaid-1". mermaid removes/rebuilds its temporary DOM nodes by that
+    // id, so the second render clobbered the first and the two SVGs overlapped
+    // and cross-wired each other's <defs>. One shared counter keeps every id
+    // unique for the lifetime of the page.
     var renderSeq = 0;
+    // mermaid keeps its diagram DB in a module-level singleton, so concurrent
+    // render() calls can interleave on that shared state. Serialize all renders
+    // through one global promise chain; a rejected render must not poison it.
+    var renderChain = Promise.resolve();
+    function enqueueRender(run) {
+      var result = renderChain.then(run, run);
+      renderChain = result.then(function () {}, function () {});
+      return result;
+    }
 
     /**
      * Load the bundle exactly once and hand back the global `mermaid` object.
@@ -100,20 +114,56 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Decide whether the active palette is dark.
+     *
+     * The ThemePresenter marks dark with a `data-ds-dark-theme` attribute on
+     * `body`, so that is the authoritative signal; the media query and the
+     * theme-source attribute cover palettes that follow the system or a
+     * non-standard source.
+     */
+    function isDarkMode() {
+      try {
+        var body = typeof document !== 'undefined' ? document.body : null;
+        if (body && body.hasAttribute && body.hasAttribute('data-ds-dark-theme')) return true;
+        var de = typeof document !== 'undefined' ? document.documentElement : null;
+        if (de && de.getAttribute) {
+          var src = (de.getAttribute('data-ds-theme-source') || '').toLowerCase();
+          if (src.indexOf('dark') !== -1) return true;
+        }
+        var mql = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+          ? window.matchMedia('(prefers-color-scheme: dark)')
+          : null;
+        return !!(mql && mql.matches);
+      } catch {
+        return false;
+      }
+    }
+
     /** Map the DSH palette onto mermaid's `themeVariables`. */
     function themeVariables() {
+      // Edges and node borders need real contrast against the background. The
+      // theme's `border-l2` is a hairline token (rgba(...,.12) in dark), which is
+      // far too faint to serve as a diagram line, so pick a mid-tone label token
+      // that inverts with the mode: a light line on dark, a dark line on light.
+      var line = isDarkMode()
+        ? cssVar('--dsw-alias-label-secondary', '#e2e8f0')
+        : cssVar('--dsw-alias-label-tertiary', '#475569');
+      var lineStrong = isDarkMode()
+        ? cssVar('--dsw-alias-label-primary', '#f1f5f0')
+        : cssVar('--dsw-alias-label-secondary', '#334155');
       return {
         background: 'transparent',
         primaryColor: cssVar('--dsw-alias-bg-layer-2', '#f8fafc'),
         primaryTextColor: cssVar('--dsw-alias-label-primary', '#0f172a'),
-        primaryBorderColor: cssVar('--dsw-alias-border-l2', '#cbd5e1'),
-        lineColor: cssVar('--dsw-alias-border-l2', '#cbd5e1'),
+        primaryBorderColor: line,
+        lineColor: line,
         secondaryColor: cssVar('--dsw-alias-bg-layer-3', '#f1f5f9'),
         tertiaryColor: cssVar('--dsw-alias-bg-layer-1', '#ffffff'),
         clusterBkg: cssVar('--dsw-alias-bg-layer-2', '#f8fafc'),
-        clusterBorder: cssVar('--dsw-alias-border-l2', '#cbd5e1'),
+        clusterBorder: line,
         edgeLabelBackground: cssVar('--dsw-alias-bg-layer-1', '#ffffff'),
-        nodeBorder: cssVar('--dsw-alias-border-l2', '#cbd5e1'),
+        nodeBorder: lineStrong,
         fontFamily: cssVar('--dsh-font-family-text', cssVar('--dsw-font-family', 'system-ui, sans-serif')),
         fontSize: '13px',
         textColor: cssVar('--dsw-alias-label-primary', '#0f172a'),
@@ -123,7 +173,7 @@ window.__ModuleLoader__.load({
     /** Signature of the tokens we consume; changes when the palette swaps. */
     function themeSignature() {
       try {
-        return JSON.stringify(themeVariables());
+        return JSON.stringify([themeVariables(), isDarkMode()]);
       } catch {
         return '';
       }
@@ -187,40 +237,41 @@ window.__ModuleLoader__.load({
       var failed = failedState[0], setFailed = failedState[1];
       var loadingState = useState(true);
       var loading = loadingState[0], setLoading = loadingState[1];
-      var renderIdRef = useRef(0);
-
       useEffect(function () {
-        var renderId = ++renderIdRef.current;
+        var renderId = ++renderSeq;
         var cancelled = false;
         setLoading(true);
         setFailed(false);
         setSvg('');
 
         loadMermaid().then(function (mermaid) {
-          if (cancelled || renderId !== renderIdRef.current) return;
-          try {
-            mermaid.initialize({
-              startOnLoad: false,
-              securityLevel: 'strict',
-              theme: 'base',
-              themeVariables: themeVariables(),
-              flowchart: { curve: 'basis', useMaxWidth: true },
-            });
-            return mermaid
-              .render('dsh-mermaid-' + renderId, code)
-              .then(function (out) {
-                if (cancelled || renderId !== renderIdRef.current) return;
-                var outSvg = out && out.svg ? out.svg : '';
-                if (outSvg) setSvg(outSvg);
-                else setFailed(true);
+          if (cancelled) return;
+          return enqueueRender(function () {
+            if (cancelled) return;
+            try {
+              mermaid.initialize({
+                startOnLoad: false,
+                securityLevel: 'strict',
+                theme: 'base',
+                themeVariables: themeVariables(),
+                flowchart: { curve: 'basis', useMaxWidth: true },
               });
-          } catch (error) {
-            if (!cancelled && renderId === renderIdRef.current) setFailed(true);
-          }
+              return mermaid
+                .render('dsh-mermaid-' + renderId, code)
+                .then(function (out) {
+                  if (cancelled) return;
+                  var outSvg = out && out.svg ? out.svg : '';
+                  if (outSvg) setSvg(outSvg);
+                  else setFailed(true);
+                });
+            } catch (error) {
+              if (!cancelled) setFailed(true);
+            }
+          });
         }).catch(function () {
-          if (!cancelled && renderId === renderIdRef.current) setFailed(true);
+          if (!cancelled) setFailed(true);
         }).then(function () {
-          if (!cancelled && renderId === renderIdRef.current) setLoading(false);
+          if (!cancelled) setLoading(false);
         });
 
         return function () {
@@ -247,6 +298,15 @@ window.__ModuleLoader__.load({
     var STYLES = [
       '.dsh-mermaid{display:flex;justify-content:center;align-items:center;padding:12px;overflow:auto}',
       '.dsh-mermaid svg{max-width:100%;height:auto;display:block}',
+      /* Edges: mermaid's line color token is thin and can wash out on a dark
+         backdrop; give edges a firm stroke that stays crisp while scaling. */
+      '.dsh-mermaid svg .edgePath,.dsh-mermaid svg .edge-path,.dsh-mermaid svg path[class*="edge"]{stroke-width:1.6px;vector-effect:non-scaling-stroke}',
+      '.dsh-mermaid svg .cluster{stroke-width:1.2px}',
+      /* Mermaid places each subgraph title exactly on the cluster's top border,
+         so the label sits half on the line. Nudge it down inside the box; the
+         CSS `translate` property adds to the element's existing `transform`
+         attribute without touching its horizontal position. */
+      '.dsh-mermaid svg .cluster-label{translate:0 9px}',
       '.dsh-mermaid-loading{height:64px;border-radius:var(--dsw-radius-md,8px);',
       'background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.12));',
       'animation:dsh-mermaid-pulse 1.2s ease-in-out infinite}',

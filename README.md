@@ -42,6 +42,11 @@ plugin_manager install_bundle，target = 本目录绝对路径
 
 装后在设置 → 插件里可见。渲染发生在客户端，无需重启宿主。
 
+## 更新记录
+
+- **1.0.1** — 修复同一对话出现多个 mermaid 图时互相重叠的问题：渲染 id 从「每个组件各自计数」改为模块级全局单调计数（否则两图都拿到 `dsh-mermaid-1`，mermaid 按该 id 复用 / 重建临时 DOM，导致两个 SVG 串图、层叠）；同时把渲染串行化到一条全局 Promise 链，避免 mermaid 的模块级单例 diagram DB 在并发渲染时相互污染。
+- **1.0.0** — 首版：把 ```` ```mermaid ```` 围栏渲染成跟随 DSH 主题的 SVG。
+
 ## 许可
 
 插件代码 MIT。内嵌的 `mermaid.min.js` 遵循 mermaid.js 的 MIT 许可。
