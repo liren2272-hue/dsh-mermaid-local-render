@@ -287,6 +287,86 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Normalize a (possibly malformed) image path from an `image` fence.
+     *
+     * Agents frequently write Windows paths with raw spaces, a stray `/`
+     * before the drive, a `file://` prefix, or a relative path. Native
+     * Markdown image rendering rejects most of these, so this helper folds
+     * them into an absolute path that the host's /api/file route accepts.
+     * Returns null when the text does not look like a usable path.
+     */
+    function normalizeImagePath(raw) {
+      var value = (raw || '').trim();
+      if (!value) return null;
+      // Strip a surrounding sentence or quotes if the agent wrapped the path.
+      var quoted = value.match(/^["'`](.+)["'`]$/s);
+      if (quoted) value = quoted[1].trim();
+      // file:// URI -> plain path (accept file:///D:/... and file:///C:/...).
+      var fileUri = value.match(/^file:\/\/(?:\/)?([A-Za-z]:[\/\\].*)$/is);
+      if (fileUri) value = fileUri[1];
+      else if (/^file:\/\//i.test(value)) return null;
+      // Unwrap angle brackets sometimes used around paths with spaces.
+      var angled = value.match(/^<(.+)>$/s);
+      if (angled) value = angled[1].trim();
+      // Decode %XX escapes, but guard against malformed sequences.
+      try { value = decodeURIComponent(value); } catch { /* keep raw text */ }
+      value = value.replace(/\\/g, '/');
+      // A leading slash before a Windows drive (/D:/foo) is a common typo.
+      value = value.replace(/^\/+([A-Za-z]:\/)/, '$1');
+      var isAbsolute = /^[A-Za-z]:\//.test(value) || /^\//.test(value);
+      if (!isAbsolute) {
+        // Relative path: resolve against the page directory (best effort).
+        if (typeof document === 'undefined' || !document.baseURI) return null;
+        try { value = new URL(value, document.baseURI).pathname; } catch { return null; }
+        try { value = decodeURIComponent(value); } catch { /* keep as-is */ }
+      }
+      // Reject control characters; the host route refuses them.
+      if (/[\u0000-\u001f\u007f]/.test(value)) return null;
+      return value;
+    }
+
+    /** MIME type hint from the file extension; the host ignores it for access. */
+    function imageMime(path) {
+      var ext = (path.split('.').pop() || '').toLowerCase();
+      if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+      if (ext === 'gif') return 'image/gif';
+      if (ext === 'webp') return 'image/webp';
+      if (ext === 'svg') return 'image/svg+xml';
+      return 'image/png';
+    }
+
+    /**
+     * Render one image fence. Fetches the bytes through the same-origin
+     * authenticated /api/file route and shows them via a blob URL, so raw
+     * spaces in the path are encoded correctly and the browser's credential
+     * flow is preserved.
+     */
+    function ImageFence(props) {
+      var raw = props.code || '';
+      var failedState = useState(false);
+      var failed = failedState[0], setFailed = failedState[1];
+      var loadedState = useState(false);
+      var loaded = loadedState[0], setLoaded = loadedState[1];
+      var path = normalizeImagePath(raw);
+      var src = path ? routeUrl('api/file?path=' + encodeURIComponent(path)) : null;
+      useEffect(function () { setFailed(false); setLoaded(false); }, [raw]);
+      if (!src || failed) return h('div', { className: 'dsh-image-fence-error' },
+        'IMAGE_FENCE_FAILED: ' + (path || raw || '(empty path)'));
+      return h('div', { className: 'dsh-image-fence' },
+        !loaded ? h('div', { className: 'dsh-mermaid-loading', 'aria-hidden': true }) : null,
+        h('img', {
+          src: src, alt: 'image', className: 'dsh-image-fence-img',
+          style: loaded ? void 0 : { display: 'none' },
+          onLoad: function () { setLoaded(true); },
+          onError: function () { setFailed(true); }
+        }));
+    }
+    function ImageFenceLayer(props) {
+      if (props.streaming) return props.children;
+      return h(ImageFence, { code: props.code, children: props.children });
+    }
+
+    /**
      * The fence layer: keep the source while streaming, then hand off to the
      * renderer once the document settles.
      */
@@ -312,6 +392,9 @@ window.__ModuleLoader__.load({
       'animation:dsh-mermaid-pulse 1.2s ease-in-out infinite}',
       '@keyframes dsh-mermaid-pulse{0%,100%{opacity:.6}50%{opacity:1}}',
       '@media (prefers-reduced-motion:reduce){.dsh-mermaid-loading{animation:none}}',
+      '.dsh-image-fence{display:flex;justify-content:center;padding:8px}',
+      '.dsh-image-fence-img{max-width:100%;height:auto;border-radius:var(--dsw-radius-md,6px)}',
+      '.dsh-image-fence-error{padding:8px;color:var(--dsw-alias-fg-danger,#e06c75);font-family:var(--dsw-font-mono,monospace);font-size:12px;word-break:break-all}',
     ].join('');
 
     return {
@@ -332,6 +415,11 @@ window.__ModuleLoader__.load({
             key: 'mermaid',
             id: '@local/dsh-mermaid/fence/mermaid',
           }, MermaidFenceLayer);
+          ctx.slots.register({
+            name: 'conversation.chat.markdown.fence',
+            key: 'image',
+            id: '@local/dsh-mermaid/fence/image',
+          }, ImageFenceLayer);
         });
       },
     };
